@@ -13,8 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef XLA_HLO_TOOLS_TESTS_HLO_OPT_DUMMY_PASSES_H_
-#define XLA_HLO_TOOLS_TESTS_HLO_OPT_DUMMY_PASSES_H_
+#ifndef XLA_HLO_TOOLS_TESTS_HLO_OPT_TEST_ONLY_PASSES_H_
+#define XLA_HLO_TOOLS_TESTS_HLO_OPT_TEST_ONLY_PASSES_H_
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
@@ -24,8 +24,9 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/pass/hlo_pass_interface.h"
+#include "xla/hlo/transforms/simplifiers/algebraic_simplifier.h"
 
-namespace xla {
+namespace xla::test_only {
 
 // A module pass which renames instructions named 'foo' to 'bar'.
 class FooToBarModulePass : public HloModulePass {
@@ -71,6 +72,26 @@ class BarToHelloModulePass : public HloModulePass {
   }
 };
 
-}  // namespace xla
+// Allows `AlgebraicSimplifier::IsOneDnnRewritableBF16Conv` to be tested in an
+// arbitrary testing environment.
+class RewriteBf16ConvToOnednn : public AlgebraicSimplifier {
+ public:
+  absl::string_view name() const override {
+    return "test-only-rewrite-bf16-conv-to-onednn";
+  }
 
-#endif  // XLA_HLO_TOOLS_TESTS_HLO_OPT_DUMMY_PASSES_H_
+  explicit RewriteBf16ConvToOnednn()
+      : AlgebraicSimplifier(TestSpecificOptions()) {}
+
+ private:
+  static AlgebraicSimplifierOptions TestSpecificOptions() {
+    AlgebraicSimplifierOptions options;
+    options.set_try_rewrite_bf16_conv_to_onednn(true);
+    options.set_executing_on_cpu(true);
+    return options;
+  }
+};
+
+}  // namespace xla::test_only
+
+#endif  // XLA_HLO_TOOLS_TESTS_HLO_OPT_TEST_ONLY_PASSES_H_

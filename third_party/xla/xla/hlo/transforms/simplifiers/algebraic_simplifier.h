@@ -207,8 +207,7 @@ class AlgebraicSimplifierOptions {
     return enable_scalar_multiply_reduction_;
   }
 
-  // Also the algebraic simplifer to treat floating point values like real
-  // numbers.
+  // Set the algebraic simplifier to treat floats as real numbers.
   void set_enable_floats_are_real(bool enable_floats_are_real) {
     enable_floats_are_real_ = enable_floats_are_real;
   }
@@ -332,6 +331,15 @@ class AlgebraicSimplifierOptions {
     return enable_remove_no_op_reduce_precision_;
   }
 
+  bool try_rewrite_bf16_conv_to_onednn() const {
+    return try_rewrite_bf16_conv_to_onednn_;
+  }
+
+  void set_try_rewrite_bf16_conv_to_onednn(
+      bool try_rewrite_bf16_conv_to_onednn) {
+    try_rewrite_bf16_conv_to_onednn_ = try_rewrite_bf16_conv_to_onednn;
+  }
+
  private:
   // Metadata struct can be used to store any metadata information encapsulated
   // with the AlgebraicSimplifierOptions that can be later used in an
@@ -375,6 +383,7 @@ class AlgebraicSimplifierOptions {
   bool enable_fast_math_{false};
   bool enable_broadcast_degenerate_dimension_{true};
   bool enable_remove_no_op_reduce_precision_{false};
+  bool try_rewrite_bf16_conv_to_onednn_{false};
   Metadata metadata_;
 };
 
@@ -764,7 +773,7 @@ class AlgebraicSimplifierVisitor : public DfsHloRewriteVisitor {
   absl::StatusOr<bool> TrySimplifyTautologicalCompare(
       HloInstruction* conjunction);
 
-  // Tries to simlplify (bitcast-convert (concat (bitcast-convert A) ...)) where
+  // Tries to simplify (bitcast-convert (concat (bitcast-convert A) ...)) where
   // the types of inner and outer bitcast-convert cancel out.
   absl::StatusOr<bool> TrySimplifyTautologicalBitcastConvert(
       HloInstruction* bitcast);
