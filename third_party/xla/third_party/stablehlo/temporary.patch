@@ -62,7 +62,49 @@ diff --ruN a/stablehlo/stablehlo/tests/transforms/stablehlo_aggressive_simplific
  }
  
  // -----
-diff --ruN a/stablehlo/stablehlo/tests/transforms/stablehlo_legalize_qdq_to_quantized_op.mlir b/stablehlo/stablehlo/tests/transforms/stablehlo_legalize_qdq_to_quantized_op.mlir
+diff --ruN a/stablehlo/stablehlo/tests/transforms/stablehlo_compatibility_expander_locations.mlir b/stablehlo/stablehlo/tests/transforms/stablehlo_compatibility_expander_locations.mlir
+--- stablehlo/stablehlo/tests/transforms/stablehlo_compatibility_expander_locations.mlir
++++ stablehlo/stablehlo/tests/transforms/stablehlo_compatibility_expander_locations.mlir
+@@ -0,0 +1,39 @@
++// RUN: stablehlo-opt %s -stablehlo-compatibility-expander=target=1.8.0 --mlir-print-debuginfo | FileCheck %s
++
++// Test that FileLineColRange locations are converted to FileLineColLoc
++// locations, including in nested location contexts, block args, module op, etc.
++// Ex: loc("file.mlir":2:21 to :30) ==> loc("file.mlir":2:21)
++
++#loc3 = loc("file.mlir":2:21 to :30)
++module {
++  func.func @main(%arg0: tensor<i32> loc("file.mlir":2:21 to :30)) -> tensor<i32> {
++    %c = stablehlo.constant dense<1> : tensor<i32> loc(#loc4)
++    %0 = stablehlo.add %arg0, %c : tensor<i32> loc(#loc5)
++    return %c : tensor<i32> loc(#loc6)
++  } loc(#loc9)
++} loc(#loc)
++#loc = loc("file.mlir":0:0 to :3)
++#loc1 = loc("file.mlir":1:1 to :2)
++#loc2 = loc("file.mlir":2:19 to :20)
++#loc4 = loc("file.mlir":2:8 to :10)
++#loc5 = loc("file.mlir":4:10 to :12)
++#loc6 = loc("file.mlir":3:3 to :5)
++#loc7 = loc("WrappedLocation.call"(#loc1))
++#loc8 = loc("WrappedLocation.callsite"(#loc2))
++#loc9 = loc(callsite(#loc7 at #loc8))
++
++// CHECK:      #loc3 = loc("file.mlir":2:21)
++// CHECK-NEXT: module {
++// CHECK-NEXT:   func.func @main{{.*}}tensor<i32> loc("file.mlir":2:21)
++// CHECK-NEXT:     stablehlo.constant {{.*}} loc(#loc4)
++// CHECK-NEXT:     return {{.*}} loc(#loc5)
++// CHECK-NEXT:   } loc(#loc8)
++// CHECK-NEXT: } loc(#loc)
++// CHECK-NEXT: #loc = loc("file.mlir":0:0)
++// CHECK-NEXT: #loc1 = loc("file.mlir":1:1)
++// CHECK-NEXT: #loc2 = loc("file.mlir":2:19)
++// CHECK-NEXT: #loc4 = loc("file.mlir":2:8)
++// CHECK-NEXT: #loc5 = loc("file.mlir":3:3)
++// CHECK-NEXT: #loc6 = loc("WrappedLocation.call"(#loc1))
++// CHECK-NEXT: #loc7 = loc("WrappedLocation.callsite"(#loc2))
++// CHECK-NEXT: #loc8 = loc(callsite(#loc6 at #loc7))diff --ruN a/stablehlo/stablehlo/tests/transforms/stablehlo_legalize_qdq_to_quantized_op.mlir b/stablehlo/stablehlo/tests/transforms/stablehlo_legalize_qdq_to_quantized_op.mlir
 --- stablehlo/stablehlo/tests/transforms/stablehlo_legalize_qdq_to_quantized_op.mlir
 +++ stablehlo/stablehlo/tests/transforms/stablehlo_legalize_qdq_to_quantized_op.mlir
 @@ -127,3 +127,15 @@
@@ -81,6 +123,190 @@ diff --ruN a/stablehlo/stablehlo/tests/transforms/stablehlo_legalize_qdq_to_quan
 +  %1 = stablehlo.uniform_quantize %0 : (tensor<2xf32>) -> tensor<2x!quant.uniform<u8:f32, 3.400000e+01:16>>
 +  return %1 : tensor<2x!quant.uniform<u8:f32, 3.400000e+01:16>>
 +}
+diff --ruN a/stablehlo/stablehlo/transforms/PassUtils.h b/stablehlo/stablehlo/transforms/PassUtils.h
+--- stablehlo/stablehlo/transforms/PassUtils.h
++++ stablehlo/stablehlo/transforms/PassUtils.h
+@@ -76,6 +76,8 @@
+                              int32_t quantizedDimension, int64_t storageTypeMin,
+                              int64_t storageTypeMax);
+ 
++
++
+ }  // namespace stablehlo
+ }  // namespace mlir
+ 
+diff --ruN a/stablehlo/stablehlo/transforms/Passes.td b/stablehlo/stablehlo/transforms/Passes.td
+--- stablehlo/stablehlo/transforms/Passes.td
++++ stablehlo/stablehlo/transforms/Passes.td
+@@ -55,7 +55,7 @@
+   }];
+ }
+ 
+-def StablehloCompatibilityExpanderPass : Pass<"stablehlo-compatibility-expander", "mlir::func::FuncOp"> {
++def StablehloCompatibilityExpanderPass : Pass<"stablehlo-compatibility-expander", "mlir::ModuleOp"> {
+   let summary = "Compatibility expander for StableHLO operations.";
+ 
+   let description = [{
+diff --ruN a/stablehlo/stablehlo/transforms/StablehloCompatibilityExpander.cpp b/stablehlo/stablehlo/transforms/StablehloCompatibilityExpander.cpp
+--- stablehlo/stablehlo/transforms/StablehloCompatibilityExpander.cpp
++++ stablehlo/stablehlo/transforms/StablehloCompatibilityExpander.cpp
+@@ -11,6 +11,7 @@
+ ==============================================================================*/
+ 
+ #include <fcntl.h>
++#include <stdbool.h>
+ 
+ #include <algorithm>
+ #include <cassert>
+@@ -21,23 +22,30 @@
+ #include "llvm/ADT/APFloat.h"
+ #include "llvm/ADT/STLExtras.h"
+ #include "llvm/ADT/SmallVector.h"
++#include "llvm/Support/Casting.h"
++#include "llvm/Support/Debug.h"
+ #include "llvm/Support/ErrorHandling.h"
+ #include "llvm/Support/MathExtras.h"
+ #include "mlir/Dialect/Func/IR/FuncOps.h"
++#include "mlir/IR/Attributes.h"
+ #include "mlir/IR/Builders.h"
+ #include "mlir/IR/BuiltinAttributes.h"
++#include "mlir/IR/BuiltinOps.h"
+ #include "mlir/IR/BuiltinTypeInterfaces.h"
+ #include "mlir/IR/BuiltinTypes.h"
+ #include "mlir/IR/Diagnostics.h"
++#include "mlir/IR/Location.h"
+ #include "mlir/IR/PatternMatch.h"
++#include "mlir/IR/Region.h"
+ #include "mlir/Rewrite/FrozenRewritePatternSet.h"
+ #include "mlir/Support/LLVM.h"
+-#include "mlir/Transforms/DialectConversion.h"
+ #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+ #include "stablehlo/dialect/StablehloOps.h"
+ #include "stablehlo/dialect/Version.h"
+-#include "stablehlo/transforms/PassUtils.h"
++#include "stablehlo/transforms/PassUtils.h"  // IWYU pragma: keep
+ #include "stablehlo/transforms/Passes.h"
++
++#define DEBUG_TYPE "compat-passes"
+ 
+ namespace mlir {
+ namespace stablehlo {
+@@ -167,7 +175,7 @@
+ // Converts a `GatherOp` with batching dims to a `GatherOp` without batching
+ // dims, such that each batching dim becomes a collapsed slice dim with a
+ // corresponding `IotaOp` concatenated to the start indices.
+-class GatherWithBatchingDimsExpander : public OpRewritePattern<GatherOp> {
++struct GatherWithBatchingDimsExpander : public OpRewritePattern<GatherOp> {
+   using OpRewritePattern<GatherOp>::OpRewritePattern;
+ 
+   LogicalResult matchAndRewrite(GatherOp op,
+@@ -213,7 +221,7 @@
+ // Converts a `ScatterOp` with batching dims to a `ScatterOp` without batching
+ // dims, such that each batching dim becomes an inserted window dim with a
+ // corresponding `IotaOp` concatenated to the scatter indices.
+-class ScatterWithBatchingDimsExpander : public OpRewritePattern<ScatterOp> {
++struct ScatterWithBatchingDimsExpander : public OpRewritePattern<ScatterOp> {
+   using OpRewritePattern<ScatterOp>::OpRewritePattern;
+ 
+   LogicalResult matchAndRewrite(ScatterOp op,
+@@ -262,6 +270,73 @@
+   }
+ };
+ 
++// Converts a `FileLineColRange` location to a `FileLineColLoc` location.
++// Returns a pair of (changed, location), where location is the new location
++// or identity if unchanged.
++std::pair<bool, Location> convertFileLineColRangeToLoc(Location loc) {
++  bool changed = false;
++  Attribute newLoc = loc->replace([&](Attribute loc) -> Attribute {
++    LLVM_DEBUG(llvm::dbgs() << "Found location " << loc << "\n");
++    if (auto flcLoc = dyn_cast<FileLineColRange>(loc)) {
++      // Skip if it's actually a FileLineColLoc
++      if (isStrictFileLineColLoc(flcLoc)) return loc;
++
++      // Replace FileLineColRange with FileLineColLoc
++      changed = true;
++      auto newFlcLoc = FileLineColLoc::get(
++          flcLoc.getFilename(), flcLoc.getStartLine(), flcLoc.getStartColumn());
++      LLVM_DEBUG(llvm::dbgs()
++                 << "Rewriting FLC " << loc << " -> " << newFlcLoc << "\n");
++      return newFlcLoc;
++    }
++    return loc;
++  });
++  return {changed, llvm::cast<Location>(newLoc)};
++}
++
++// FileLineColRange locations are a forward incompatibility in upstream MLIR.
++// This pattern removes the precise start/end range information and converts
++// all FileLineColRange locations to forward compatible FileLineColLoc
++// locations.
++struct FileLineColRangeToLoc : public RewritePattern {
++  FileLineColRangeToLoc(MLIRContext *context, PatternBenefit benefit = 1)
++      : RewritePattern(MatchAnyOpTypeTag(), benefit, context) {}
++
++  LogicalResult matchAndRewrite(Operation * op,
++                                PatternRewriter &rewriter) const override {
++    bool changed = false;
++
++    // Handle the module op when looking at func ops
++    // This should be safe since this pass is declared as a ModuleOp level pass
++    // in the pass TD file, so no async issues.
++    if (auto func = dyn_cast<func::FuncOp>(op)) {
++      auto module = op->getParentOfType<ModuleOp>();
++      auto [moduleChanged, newModuleLoc] =
++          convertFileLineColRangeToLoc(module.getLoc());
++      changed |= moduleChanged;
++      module->setLoc(newModuleLoc);
++    }
++
++    // Update op location
++    auto [opChanged, newLoc] = convertFileLineColRangeToLoc(op->getLoc());
++    changed |= opChanged;
++    op->setLoc(llvm::cast<Location>(newLoc));
++
++    // Update op block argument locations
++    for (Region &region : op->getRegions()) {
++      for (Block &block : region) {
++        for (auto arg : block.getArguments()) {
++          auto [argChanged, newArgLoc] =
++              convertFileLineColRangeToLoc(arg.getLoc());
++          changed |= argChanged;
++          arg.setLoc(newArgLoc);
++        }
++      }
++    }
++    return success(changed);
++  }
++};
++
+ //===----------------------------------------------------------------------===//
+ // Pass
+ //===----------------------------------------------------------------------===//
+@@ -290,9 +365,9 @@
+   }
+ 
+   void runOnOperation() override {
+-    auto func = getOperation();
+-    if (failed(applyPatternsGreedily(func, patterns, config))) {
+-      func.emitError(
++    auto module = getOperation();
++    if (failed(applyPatternsGreedily(module, patterns, config))) {
++      module.emitError(
+           "Failed to converge StableHLOCompatibilityExpanderPass in ")
+           << config.maxIterations << " iterations";
+       signalPassFailure();
+@@ -321,6 +396,10 @@
+   if (targetVersion < vhlo::Version(1, 4, 0))
+     patterns->add<TanOp_ComplexElementType_CompatiblityExpander,
+                   TanOp_CompatiblityExpander>(context);
++
++  // MLIR Upstream FileLineColRange introduced just before v1.8.4.
++  if (targetVersion < vhlo::Version(1, 8, 4))
++    patterns->add<FileLineColRangeToLoc>(context);
+ }
+ 
+ }  // namespace stablehlo
 diff --ruN a/stablehlo/stablehlo/transforms/StablehloLegalizeQDQToQuantizedOp.cpp b/stablehlo/stablehlo/transforms/StablehloLegalizeQDQToQuantizedOp.cpp
 --- stablehlo/stablehlo/transforms/StablehloLegalizeQDQToQuantizedOp.cpp
 +++ stablehlo/stablehlo/transforms/StablehloLegalizeQDQToQuantizedOp.cpp
@@ -95,6 +321,67 @@ diff --ruN a/stablehlo/stablehlo/transforms/StablehloLegalizeQDQToQuantizedOp.cp
      llvm::SmallVector<Value> quantizedComputeOpOperands;
      for (const Value& operand : computeOp->getOperands()) {
        auto* definingOp = operand.getDefiningOp();
+diff --ruN a/stablehlo/stablehlo/transforms/VhloToVersion.cpp b/stablehlo/stablehlo/transforms/VhloToVersion.cpp
+--- stablehlo/stablehlo/transforms/VhloToVersion.cpp
++++ stablehlo/stablehlo/transforms/VhloToVersion.cpp
+@@ -27,6 +27,7 @@
+ #include "mlir/IR/BuiltinAttributes.h"
+ #include "mlir/IR/BuiltinTypes.h"
+ #include "mlir/IR/Diagnostics.h"
++#include "mlir/IR/Location.h"
+ #include "mlir/IR/PatternMatch.h"
+ #include "mlir/IR/Region.h"
+ #include "mlir/IR/Types.h"
+@@ -186,6 +187,28 @@
+   return success();
+ }
+ 
++bool isLegalLocation(Location loc, const Version& targetVersion) {
++  // FileLineColRange locations are a forward incompatibility in upstream MLIR
++  // just before v1.8.4 was tagged. Support for downgrading these locations
++  // exists in StablehloCompatibilityExpanderPass.
++  bool isLegal = true;
++  loc->walk([&](Location childLoc) -> WalkResult {
++    if (auto fileLineColLoc = dyn_cast<FileLineColRange>(childLoc)) {
++      static const Version kFileLineColLocMinVersion = Version(1, 8, 4);
++      if (!isStrictFileLineColLoc(loc) &&
++          targetVersion < kFileLineColLocMinVersion) {
++        LLVM_DEBUG(llvm::dbgs() << "failed to legalize location " << loc
++                                << " to version " << targetVersion << '\n');
++        isLegal = false;
++        return WalkResult::interrupt();
++      }
++    }
++    return WalkResult::advance();
++  });
++
++  return isLegal;
++}
++
+ bool isLegalOperation(Operation* op, const Version& targetVersion) {
+   // Validate op
+   auto opInterface = dyn_cast<VersionedOpInterface>(op);
+@@ -208,6 +231,7 @@
+     return succeeded(isLegalAttribute(attr.getValue(), targetVersion));
+   };
+   if (!llvm::all_of(op->getAttrs(), isLegalAttrFn)) return false;
++  LLVM_DEBUG(llvm::dbgs() << "Legal op attributes for target. " << op << '\n');
+ 
+   // Validate types
+   auto isLegalTypeFn = [&](Type t) {
+@@ -216,6 +240,12 @@
+   if (!llvm::all_of(op->getOperandTypes(), isLegalTypeFn) ||
+       !llvm::all_of(op->getResultTypes(), isLegalTypeFn))
+     return false;
++  LLVM_DEBUG(llvm::dbgs() << "Legal op types for target. " << op << '\n');
++
++  // Validate location
++  if (!isLegalLocation(op->getLoc(), targetVersion)) return false;
++  LLVM_DEBUG(llvm::dbgs() << "Legal op location for target. " << op << '\n');
++
+   return true;
+ }
+ 
 diff --ruN a/stablehlo/stablehlo/transforms/optimization/StablehloAggressiveSimplification.cpp b/stablehlo/stablehlo/transforms/optimization/StablehloAggressiveSimplification.cpp
 --- stablehlo/stablehlo/transforms/optimization/StablehloAggressiveSimplification.cpp
 +++ stablehlo/stablehlo/transforms/optimization/StablehloAggressiveSimplification.cpp
